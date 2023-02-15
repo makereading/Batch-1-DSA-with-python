@@ -1,0 +1,35 @@
+- [ ] Python Bootcamp
+- [ ] Python Bootcamp
+- [ ] Git Bootcamp
+- [ ] Session
+    - [ ] 1. What is an Algorithm ?
+    - [ ] 2. What is Data Structures. 
+    - [ ] 3. Asymptotic Notation and its importance
+    - [ ] 4. Big O Notation
+    - [ ] 5. Master Theorem
+    - [ ] 6. Master Theorem for Divide & Conquer
+    - [ ] 7. Amortized Analysis
+- [ ] Session - Memory Usage in Python
+- [ ] Session - Recursion
+- [ ] Session - Backtracking
+- [ ] Session - Simple Linked List
+- [ ] Session - Double Linked List
+- [ ] Session - Circular Linked List
+- [ ] Session - Unrolled Linked List
+- [ ] Session - Skip Lists
+- [ ] Session - Stack
+- [ ] Session - Queue
+- [ ] Session - Simple Tree
+- [ ] Session - Binary Tree
+- [ ] Session - Tree Traversal
+- [ ] Session - Generic Trees
+- [ ] Session - Expression Trees
+- [ ] Session - XOR Trees
+- [ ] Session - Binary Search Trees
+- [ ] Session - AVL Tree
+- [ ] Session - Priority Queues
+- [ ] Session - Heaps
+- [ ] Session - Binary Heaps
+- [ ] Session - Heap Sort
+
+
