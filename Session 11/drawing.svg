@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="210mm"
+   height="297mm"
+   viewBox="0 0 210 297"
+   version="1.1"
+   id="svg5"
+   inkscape:version="1.1.2 (0a00cf5339, 2022-02-04)"
+   sodipodi:docname="drawing.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview7"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:document-units="mm"
+     showgrid="false"
+     inkscape:zoom="0.94786756"
+     inkscape:cx="301.20242"
+     inkscape:cy="200.97744"
+     inkscape:window-width="1292"
+     inkscape:window-height="704"
+     inkscape:window-x="74"
+     inkscape:window-y="27"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs2">
+    <rect
+       x="48.012596"
+       y="606.32953"
+       width="309.33655"
+       height="139.54248"
+       id="rect12427" />
+    <rect
+       x="24.917027"
+       y="25.615327"
+       width="721.84247"
+       height="846.23054"
+       id="rect2065" />
+  </defs>
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <text
+       xml:space="preserve"
+       transform="scale(0.26458333)"
+       id="text2063"
+       style="font-style:normal;font-weight:normal;font-size:17.3333px;line-height:1.25;font-family:sans-serif;white-space:pre;shape-inside:url(#rect2065);fill:#000000;fill-opacity:1;stroke:none"><tspan
+         x="24.917969"
+         y="40.951142"
+         id="tspan17214">def merge_sort(arr):
+</tspan><tspan
+         x="24.917969"
+         y="62.617768"
+         id="tspan17216">  if len(arr) &gt; 1: 
+</tspan><tspan
+         x="24.917969"
+         y="84.284394"
+         id="tspan17218">    mid = len(arr)//2
+</tspan><tspan
+         x="24.917969"
+         y="105.95102"
+         id="tspan17220">    L = arr[:mid]
+</tspan><tspan
+         x="24.917969"
+         y="127.61765"
+         id="tspan17222">    R = arr[mid:]
+</tspan><tspan
+         x="24.917969"
+         y="149.28427"
+         id="tspan17224">    merge_sort(L)
+</tspan><tspan
+         x="24.917969"
+         y="170.9509"
+         id="tspan17226">    merge_sort(R)
+</tspan><tspan
+         x="24.917969"
+         y="192.61752"
+         id="tspan17228">
+</tspan><tspan
+         x="24.917969"
+         y="214.28415"
+         id="tspan17230">    l_arr_index = 0
+</tspan><tspan
+         x="24.917969"
+         y="235.95078"
+         id="tspan17232">    r_arr_index = 0
+</tspan><tspan
+         x="24.917969"
+         y="257.6174"
+         id="tspan17234">    index = 0
+</tspan><tspan
+         x="24.917969"
+         y="279.28403"
+         id="tspan17236">
+</tspan><tspan
+         x="24.917969"
+         y="300.95065"
+         id="tspan17238">    # # Copy data to temp arrays L[] and R[]
+</tspan><tspan
+         x="24.917969"
+         y="322.61728"
+         id="tspan17240">    while l_arr_index &lt; len(L) and r_arr_index &lt; len(R):
+</tspan><tspan
+         x="24.917969"
+         y="344.28391"
+         id="tspan17242">      print(L[l_arr_index], R[r_arr_index])
+</tspan><tspan
+         x="24.917969"
+         y="365.95053"
+         id="tspan17244">      if L[l_arr_index] &lt;= R[r_arr_index]:
+</tspan><tspan
+         x="24.917969"
+         y="387.61716"
+         id="tspan17246">        arr[index] = L[l_arr_index]
+</tspan><tspan
+         x="24.917969"
+         y="409.28378"
+         id="tspan17248">        l_arr_index += 1
+</tspan><tspan
+         x="24.917969"
+         y="430.95041"
+         id="tspan17250">      else:
+</tspan><tspan
+         x="24.917969"
+         y="452.61704"
+         id="tspan17252">        arr[index] = R[r_arr_index]
+</tspan><tspan
+         x="24.917969"
+         y="474.28366"
+         id="tspan17254">        r_arr_index += 1
+</tspan><tspan
+         x="24.917969"
+         y="495.95029"
+         id="tspan17256">      print('arr value', arr[index])
+</tspan><tspan
+         x="24.917969"
+         y="517.61691"
+         id="tspan17258">      index += 1
+</tspan><tspan
+         x="24.917969"
+         y="539.28354"
+         id="tspan17260">
+</tspan><tspan
+         x="24.917969"
+         y="560.95017"
+         id="tspan17262">    # # Checking if any element was left
+</tspan><tspan
+         x="24.917969"
+         y="582.61679"
+         id="tspan17264">    while l_arr_index &lt; len(L):
+</tspan><tspan
+         x="24.917969"
+         y="604.28342"
+         id="tspan17266">      arr[index] = L[l_arr_index]
+</tspan><tspan
+         x="24.917969"
+         y="625.95004"
+         id="tspan17268">      l_arr_index += 1
+</tspan><tspan
+         x="24.917969"
+         y="647.61667"
+         id="tspan17270">      index += 1
+</tspan><tspan
+         x="24.917969"
+         y="669.2833"
+         id="tspan17272">
+</tspan><tspan
+         x="24.917969"
+         y="690.94992"
+         id="tspan17274">    while r_arr_index &lt; len(R):
+</tspan><tspan
+         x="24.917969"
+         y="712.61655"
+         id="tspan17276">      arr[index] = R[r_arr_index]
+</tspan><tspan
+         x="24.917969"
+         y="734.28317"
+         id="tspan17278">      r_arr_index += 1
+</tspan><tspan
+         x="24.917969"
+         y="755.9498"
+         id="tspan17280">      index += 1
+</tspan><tspan
+         x="24.917969"
+         y="777.61643"
+         id="tspan17282">
+</tspan><tspan
+         x="24.917969"
+         y="799.28305"
+         id="tspan17284">
+</tspan></text>
+    <text
+       xml:space="preserve"
+       transform="scale(0.26458333)"
+       id="text12425"
+       style="fill:black;fill-opacity:1;line-height:1.25;stroke:none;font-family:sans-serif;font-style:normal;font-weight:normal;font-size:40px;white-space:pre;shape-inside:url(#rect12427)" />
+  </g>
+</svg>

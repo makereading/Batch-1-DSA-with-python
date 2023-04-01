@@ -1,0 +1,1933 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="4460" onload="init(evt)" viewBox="0 0 1200 4460" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno">
+    <!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.-->
+    <!--NOTES: -->
+    <defs>
+        <linearGradient id="background" y1="0" y2="1" x1="0" x2="0">
+            <stop stop-color="#eeeeee" offset="5%"/>
+            <stop stop-color="#eeeeb0" offset="95%"/>
+        </linearGradient>
+    </defs>
+    <style type="text/css">
+text { font-family:monospace; font-size:16px }
+#title { text-anchor:middle; font-size:21px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style>
+    <script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 16;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = true;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script>
+    <rect x="0" y="0" width="100%" height="4460" fill="url(#background)"/>
+    <text id="title" fill="rgb(0,0,0)" x="50.0000%" y="32.00">Peak Tracked Memory Usage (0.3 MiB), Reversed</text>
+    <text id="subtitle" x="50.0000%" y="64.00">Made with the Fil profiler. <a href="https://pythonspeed.com/fil/" style="text-decoration: underline;" target="_parent">Try it on your code!</a></text>
+    <text id="details" fill="rgb(0,0,0)" x="10" y="84.00"> </text>
+    <text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="32.00">Reset Zoom</text>
+    <text id="search" fill="rgb(0,0,0)" x="1190" y="32.00">Search</text>
+    <text id="matched" fill="rgb(0,0,0)" x="1190" y="4447.00"> </text>
+    <svg id="frames" x="10" width="1180" total_samples="330508">
+        <g>
+            <title>[No Python stack] (1,480 bytes, 0.45%)</title>
+            <rect x="0.0000%" y="122" width="0.4478%" height="21" fill="rgb(255,240,240)" fg:x="0" fg:w="1480"/>
+            <text x="0.2500%" y="135.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:672 (_compile_bytecode) (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="144" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="157.50">&lt;frozen ..</text>
+        </g>
+        <g>
+            <title> (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="166" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="179.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:1012 (get_code) (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="188" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="201.50">&lt;frozen ..</text>
+        </g>
+        <g>
+            <title> (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="210" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="223.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:879 (exec_module) (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="232" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="245.50">&lt;frozen ..</text>
+        </g>
+        <g>
+            <title> (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="254" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="267.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:688 (_load_unlocked) (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="276" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="289.50">&lt;frozen ..</text>
+        </g>
+        <g>
+            <title> (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="298" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="311.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1006 (_find_and_load_unlocked) (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="320" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="333.50">&lt;frozen ..</text>
+        </g>
+        <g>
+            <title> (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="342" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="355.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1027 (_find_and_load) (26,990 bytes, 8.17%)</title>
+            <rect x="0.6051%" y="364" width="8.1662%" height="21" fill="rgb(255,207,207)" fg:x="2000" fg:w="26990"/>
+            <text x="0.8551%" y="377.50">&lt;frozen ..</text>
+        </g>
+        <g>
+            <title> (28,758 bytes, 8.70%)</title>
+            <rect x="0.4478%" y="122" width="8.7012%" height="21" fill="rgb(255,205,205)" fg:x="1480" fg:w="28758"/>
+            <text x="0.6978%" y="135.50"></text>
+        </g>
+        <g>
+            <title>class ImpImporter: (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="122" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="135.50"></text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/pkgutil.py:194 (&lt;module&gt;) (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="144" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="157.50"></text>
+        </g>
+        <g>
+            <title> (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="166" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="179.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="188" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="201.50"></text>
+        </g>
+        <g>
+            <title> (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="210" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="223.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:883 (exec_module) (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="232" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="245.50"></text>
+        </g>
+        <g>
+            <title> (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="254" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="267.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:688 (_load_unlocked) (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="276" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="289.50"></text>
+        </g>
+        <g>
+            <title> (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="298" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="311.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1006 (_find_and_load_unlocked) (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="320" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="333.50"></text>
+        </g>
+        <g>
+            <title> (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="342" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="355.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1027 (_find_and_load) (1,920 bytes, 0.58%)</title>
+            <rect x="9.2579%" y="364" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="30598" fg:w="1920"/>
+            <text x="9.5079%" y="377.50"></text>
+        </g>
+        <g>
+            <title>class ImpLoader: (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="122" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="135.50"></text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/pkgutil.py:269 (&lt;module&gt;) (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="144" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="157.50"></text>
+        </g>
+        <g>
+            <title> (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="166" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="179.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="188" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="201.50"></text>
+        </g>
+        <g>
+            <title> (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="210" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="223.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:883 (exec_module) (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="232" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="245.50"></text>
+        </g>
+        <g>
+            <title> (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="254" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="267.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:688 (_load_unlocked) (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="276" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="289.50"></text>
+        </g>
+        <g>
+            <title> (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="298" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="311.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1006 (_find_and_load_unlocked) (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="320" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="333.50"></text>
+        </g>
+        <g>
+            <title> (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="342" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="355.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1027 (_find_and_load) (1,867 bytes, 0.56%)</title>
+            <rect x="9.8388%" y="364" width="0.5649%" height="21" fill="rgb(255,238,238)" fg:x="32518" fg:w="1867"/>
+            <text x="10.0888%" y="377.50"></text>
+        </g>
+        <g>
+            <title>def iter_importer_modules(importer, prefix=&apos;&apos;): (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="122" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="135.50"></text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/pkgutil.py:137 (&lt;module&gt;) (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="144" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="157.50"></text>
+        </g>
+        <g>
+            <title> (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="166" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="179.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="188" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="201.50"></text>
+        </g>
+        <g>
+            <title> (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="210" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="223.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:883 (exec_module) (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="232" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="245.50"></text>
+        </g>
+        <g>
+            <title> (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="254" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="267.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:688 (_load_unlocked) (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="276" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="289.50"></text>
+        </g>
+        <g>
+            <title> (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="298" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="311.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1006 (_find_and_load_unlocked) (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="320" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="333.50"></text>
+        </g>
+        <g>
+            <title> (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="342" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="355.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1027 (_find_and_load) (2,048 bytes, 0.62%)</title>
+            <rect x="10.8006%" y="364" width="0.6197%" height="21" fill="rgb(255,238,238)" fg:x="35697" fg:w="2048"/>
+            <text x="11.0506%" y="377.50"></text>
+        </g>
+        <g>
+            <title>print(fact(100)) (903 bytes, 0.27%)</title>
+            <rect x="11.7931%" y="122" width="0.2732%" height="21" fill="rgb(255,242,242)" fg:x="38977" fg:w="903"/>
+            <text x="12.0431%" y="135.50"></text>
+        </g>
+        <g>
+            <title>fact.py:11 (&lt;module&gt;) (903 bytes, 0.27%)</title>
+            <rect x="11.7931%" y="144" width="0.2732%" height="21" fill="rgb(255,242,242)" fg:x="38977" fg:w="903"/>
+            <text x="12.0431%" y="157.50"></text>
+        </g>
+        <g>
+            <title>    __new__ = eval(code, namespace) (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="122" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="135.50"></text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/collections/__init__.py:414 (namedtuple) (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="144" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="157.50"></text>
+        </g>
+        <g>
+            <title>ModuleInfo = namedtuple(&apos;ModuleInfo&apos;, &apos;module_finder name ispkg&apos;) (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="166" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="179.50"></text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/pkgutil.py:22 (&lt;module&gt;) (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="188" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="201.50"></text>
+        </g>
+        <g>
+            <title> (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="210" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="223.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="232" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="245.50"></text>
+        </g>
+        <g>
+            <title> (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="254" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="267.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:883 (exec_module) (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="276" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="289.50"></text>
+        </g>
+        <g>
+            <title> (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="298" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="311.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:688 (_load_unlocked) (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="320" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="333.50"></text>
+        </g>
+        <g>
+            <title> (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="342" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="355.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1006 (_find_and_load_unlocked) (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="364" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="377.50"></text>
+        </g>
+        <g>
+            <title> (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="386" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="399.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1027 (_find_and_load) (2,236 bytes, 0.68%)</title>
+            <rect x="12.0996%" y="408" width="0.6765%" height="21" fill="rgb(255,237,237)" fg:x="39990" fg:w="2236"/>
+            <text x="12.3496%" y="421.50"></text>
+        </g>
+        <g>
+            <title>    result = type(typename, (tuple,), class_namespace) (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="122" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="135.50"></text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/collections/__init__.py:481 (namedtuple) (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="144" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="157.50"></text>
+        </g>
+        <g>
+            <title>ModuleInfo = namedtuple(&apos;ModuleInfo&apos;, &apos;module_finder name ispkg&apos;) (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="166" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="179.50"></text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/pkgutil.py:22 (&lt;module&gt;) (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="188" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="201.50"></text>
+        </g>
+        <g>
+            <title> (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="210" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="223.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="232" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="245.50"></text>
+        </g>
+        <g>
+            <title> (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="254" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="267.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:883 (exec_module) (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="276" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="289.50"></text>
+        </g>
+        <g>
+            <title> (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="298" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="311.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:688 (_load_unlocked) (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="320" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="333.50"></text>
+        </g>
+        <g>
+            <title> (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="342" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="355.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1006 (_find_and_load_unlocked) (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="364" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="377.50"></text>
+        </g>
+        <g>
+            <title> (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="386" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="399.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1027 (_find_and_load) (1,839 bytes, 0.56%)</title>
+            <rect x="14.2947%" y="408" width="0.5564%" height="21" fill="rgb(255,238,238)" fg:x="47245" fg:w="1839"/>
+            <text x="14.5447%" y="421.50"></text>
+        </g>
+        <g>
+            <title>    with _TempModule(mod_name) as temp_module, _ModifiedArgv0(fname): (1,920 bytes, 0.58%)</title>
+            <rect x="15.0254%" y="122" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="49660" fg:w="1920"/>
+            <text x="15.2754%" y="135.50"></text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/runpy.py:94 (_run_module_code) (1,920 bytes, 0.58%)</title>
+            <rect x="15.0254%" y="144" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="49660" fg:w="1920"/>
+            <text x="15.2754%" y="157.50"></text>
+        </g>
+        <g>
+            <title>        return _run_module_code(code, init_globals, run_name, (1,920 bytes, 0.58%)</title>
+            <rect x="15.0254%" y="166" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="49660" fg:w="1920"/>
+            <text x="15.2754%" y="179.50"></text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/runpy.py:289 (run_path) (1,920 bytes, 0.58%)</title>
+            <rect x="15.0254%" y="188" width="0.5809%" height="21" fill="rgb(255,238,238)" fg:x="49660" fg:w="1920"/>
+            <text x="15.2754%" y="201.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (41,284 bytes, 12.49%)</title>
+            <rect x="16.7079%" y="122" width="12.4911%" height="21" fill="rgb(255,197,197)" fg:x="55221" fg:w="41284"/>
+            <text x="16.9579%" y="135.50">        retu..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (41,284 bytes, 12.49%)</title>
+            <rect x="16.7079%" y="144" width="12.4911%" height="21" fill="rgb(255,197,197)" fg:x="55221" fg:w="41284"/>
+            <text x="16.9579%" y="157.50">fact.py:9 (fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (40,768 bytes, 12.33%)</title>
+            <rect x="16.8640%" y="166" width="12.3350%" height="21" fill="rgb(255,197,197)" fg:x="55737" fg:w="40768"/>
+            <text x="17.1140%" y="179.50">        retu..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (40,768 bytes, 12.33%)</title>
+            <rect x="16.8640%" y="188" width="12.3350%" height="21" fill="rgb(255,197,197)" fg:x="55737" fg:w="40768"/>
+            <text x="17.1140%" y="201.50">fact.py:9 (fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (40,352 bytes, 12.21%)</title>
+            <rect x="16.9899%" y="210" width="12.2091%" height="21" fill="rgb(255,197,197)" fg:x="56153" fg:w="40352"/>
+            <text x="17.2399%" y="223.50">        retu..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (40,352 bytes, 12.21%)</title>
+            <rect x="16.9899%" y="232" width="12.2091%" height="21" fill="rgb(255,197,197)" fg:x="56153" fg:w="40352"/>
+            <text x="17.2399%" y="245.50">fact.py:9 (fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (39,936 bytes, 12.08%)</title>
+            <rect x="17.1158%" y="254" width="12.0832%" height="21" fill="rgb(255,197,197)" fg:x="56569" fg:w="39936"/>
+            <text x="17.3658%" y="267.50">        retu..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (39,936 bytes, 12.08%)</title>
+            <rect x="17.1158%" y="276" width="12.0832%" height="21" fill="rgb(255,197,197)" fg:x="56569" fg:w="39936"/>
+            <text x="17.3658%" y="289.50">fact.py:9 (fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (39,520 bytes, 11.96%)</title>
+            <rect x="17.2416%" y="298" width="11.9574%" height="21" fill="rgb(255,198,198)" fg:x="56985" fg:w="39520"/>
+            <text x="17.4916%" y="311.50">        retu..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (39,520 bytes, 11.96%)</title>
+            <rect x="17.2416%" y="320" width="11.9574%" height="21" fill="rgb(255,198,198)" fg:x="56985" fg:w="39520"/>
+            <text x="17.4916%" y="333.50">fact.py:9 (fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (39,104 bytes, 11.83%)</title>
+            <rect x="17.3675%" y="342" width="11.8315%" height="21" fill="rgb(255,198,198)" fg:x="57401" fg:w="39104"/>
+            <text x="17.6175%" y="355.50">        retu..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (39,104 bytes, 11.83%)</title>
+            <rect x="17.3675%" y="364" width="11.8315%" height="21" fill="rgb(255,198,198)" fg:x="57401" fg:w="39104"/>
+            <text x="17.6175%" y="377.50">fact.py:9 (fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (38,688 bytes, 11.71%)</title>
+            <rect x="17.4934%" y="386" width="11.7056%" height="21" fill="rgb(255,198,198)" fg:x="57817" fg:w="38688"/>
+            <text x="17.7434%" y="399.50">        ret..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (38,688 bytes, 11.71%)</title>
+            <rect x="17.4934%" y="408" width="11.7056%" height="21" fill="rgb(255,198,198)" fg:x="57817" fg:w="38688"/>
+            <text x="17.7434%" y="421.50">fact.py:9 (f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (38,272 bytes, 11.58%)</title>
+            <rect x="17.6192%" y="430" width="11.5797%" height="21" fill="rgb(255,199,199)" fg:x="58233" fg:w="38272"/>
+            <text x="17.8692%" y="443.50">        ret..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (38,272 bytes, 11.58%)</title>
+            <rect x="17.6192%" y="452" width="11.5797%" height="21" fill="rgb(255,199,199)" fg:x="58233" fg:w="38272"/>
+            <text x="17.8692%" y="465.50">fact.py:9 (f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (37,856 bytes, 11.45%)</title>
+            <rect x="17.7451%" y="474" width="11.4539%" height="21" fill="rgb(255,199,199)" fg:x="58649" fg:w="37856"/>
+            <text x="17.9951%" y="487.50">        ret..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (37,856 bytes, 11.45%)</title>
+            <rect x="17.7451%" y="496" width="11.4539%" height="21" fill="rgb(255,199,199)" fg:x="58649" fg:w="37856"/>
+            <text x="17.9951%" y="509.50">fact.py:9 (f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (37,440 bytes, 11.33%)</title>
+            <rect x="17.8710%" y="518" width="11.3280%" height="21" fill="rgb(255,199,199)" fg:x="59065" fg:w="37440"/>
+            <text x="18.1210%" y="531.50">        ret..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (37,440 bytes, 11.33%)</title>
+            <rect x="17.8710%" y="540" width="11.3280%" height="21" fill="rgb(255,199,199)" fg:x="59065" fg:w="37440"/>
+            <text x="18.1210%" y="553.50">fact.py:9 (f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (37,024 bytes, 11.20%)</title>
+            <rect x="17.9968%" y="562" width="11.2021%" height="21" fill="rgb(255,199,199)" fg:x="59481" fg:w="37024"/>
+            <text x="18.2468%" y="575.50">        ret..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (37,024 bytes, 11.20%)</title>
+            <rect x="17.9968%" y="584" width="11.2021%" height="21" fill="rgb(255,199,199)" fg:x="59481" fg:w="37024"/>
+            <text x="18.2468%" y="597.50">fact.py:9 (f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (36,608 bytes, 11.08%)</title>
+            <rect x="18.1227%" y="606" width="11.0763%" height="21" fill="rgb(255,200,200)" fg:x="59897" fg:w="36608"/>
+            <text x="18.3727%" y="619.50">        ret..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (36,608 bytes, 11.08%)</title>
+            <rect x="18.1227%" y="628" width="11.0763%" height="21" fill="rgb(255,200,200)" fg:x="59897" fg:w="36608"/>
+            <text x="18.3727%" y="641.50">fact.py:9 (f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (36,192 bytes, 10.95%)</title>
+            <rect x="18.2486%" y="650" width="10.9504%" height="21" fill="rgb(255,200,200)" fg:x="60313" fg:w="36192"/>
+            <text x="18.4986%" y="663.50">        re..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (36,192 bytes, 10.95%)</title>
+            <rect x="18.2486%" y="672" width="10.9504%" height="21" fill="rgb(255,200,200)" fg:x="60313" fg:w="36192"/>
+            <text x="18.4986%" y="685.50">fact.py:9 (..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (35,776 bytes, 10.82%)</title>
+            <rect x="18.3744%" y="694" width="10.8245%" height="21" fill="rgb(255,200,200)" fg:x="60729" fg:w="35776"/>
+            <text x="18.6244%" y="707.50">        re..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (35,776 bytes, 10.82%)</title>
+            <rect x="18.3744%" y="716" width="10.8245%" height="21" fill="rgb(255,200,200)" fg:x="60729" fg:w="35776"/>
+            <text x="18.6244%" y="729.50">fact.py:9 (..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (35,360 bytes, 10.70%)</title>
+            <rect x="18.5003%" y="738" width="10.6987%" height="21" fill="rgb(255,200,200)" fg:x="61145" fg:w="35360"/>
+            <text x="18.7503%" y="751.50">        re..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (35,360 bytes, 10.70%)</title>
+            <rect x="18.5003%" y="760" width="10.6987%" height="21" fill="rgb(255,200,200)" fg:x="61145" fg:w="35360"/>
+            <text x="18.7503%" y="773.50">fact.py:9 (..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (34,944 bytes, 10.57%)</title>
+            <rect x="18.6262%" y="782" width="10.5728%" height="21" fill="rgb(255,201,201)" fg:x="61561" fg:w="34944"/>
+            <text x="18.8762%" y="795.50">        re..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (34,944 bytes, 10.57%)</title>
+            <rect x="18.6262%" y="804" width="10.5728%" height="21" fill="rgb(255,201,201)" fg:x="61561" fg:w="34944"/>
+            <text x="18.8762%" y="817.50">fact.py:9 (..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (34,528 bytes, 10.45%)</title>
+            <rect x="18.7520%" y="826" width="10.4469%" height="21" fill="rgb(255,201,201)" fg:x="61977" fg:w="34528"/>
+            <text x="19.0020%" y="839.50">        re..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (34,528 bytes, 10.45%)</title>
+            <rect x="18.7520%" y="848" width="10.4469%" height="21" fill="rgb(255,201,201)" fg:x="61977" fg:w="34528"/>
+            <text x="19.0020%" y="861.50">fact.py:9 (..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (34,112 bytes, 10.32%)</title>
+            <rect x="18.8779%" y="870" width="10.3211%" height="21" fill="rgb(255,201,201)" fg:x="62393" fg:w="34112"/>
+            <text x="19.1279%" y="883.50">        re..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (34,112 bytes, 10.32%)</title>
+            <rect x="18.8779%" y="892" width="10.3211%" height="21" fill="rgb(255,201,201)" fg:x="62393" fg:w="34112"/>
+            <text x="19.1279%" y="905.50">fact.py:9 (..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (33,696 bytes, 10.20%)</title>
+            <rect x="19.0038%" y="914" width="10.1952%" height="21" fill="rgb(255,202,202)" fg:x="62809" fg:w="33696"/>
+            <text x="19.2538%" y="927.50">        r..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (33,696 bytes, 10.20%)</title>
+            <rect x="19.0038%" y="936" width="10.1952%" height="21" fill="rgb(255,202,202)" fg:x="62809" fg:w="33696"/>
+            <text x="19.2538%" y="949.50">fact.py:9 ..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (33,280 bytes, 10.07%)</title>
+            <rect x="19.1296%" y="958" width="10.0693%" height="21" fill="rgb(255,202,202)" fg:x="63225" fg:w="33280"/>
+            <text x="19.3796%" y="971.50">        r..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (33,280 bytes, 10.07%)</title>
+            <rect x="19.1296%" y="980" width="10.0693%" height="21" fill="rgb(255,202,202)" fg:x="63225" fg:w="33280"/>
+            <text x="19.3796%" y="993.50">fact.py:9 ..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (32,864 bytes, 9.94%)</title>
+            <rect x="19.2555%" y="1002" width="9.9435%" height="21" fill="rgb(255,202,202)" fg:x="63641" fg:w="32864"/>
+            <text x="19.5055%" y="1015.50">        r..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (32,864 bytes, 9.94%)</title>
+            <rect x="19.2555%" y="1024" width="9.9435%" height="21" fill="rgb(255,202,202)" fg:x="63641" fg:w="32864"/>
+            <text x="19.5055%" y="1037.50">fact.py:9 ..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (32,448 bytes, 9.82%)</title>
+            <rect x="19.3814%" y="1046" width="9.8176%" height="21" fill="rgb(255,203,203)" fg:x="64057" fg:w="32448"/>
+            <text x="19.6314%" y="1059.50">        r..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (32,448 bytes, 9.82%)</title>
+            <rect x="19.3814%" y="1068" width="9.8176%" height="21" fill="rgb(255,203,203)" fg:x="64057" fg:w="32448"/>
+            <text x="19.6314%" y="1081.50">fact.py:9 ..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (32,032 bytes, 9.69%)</title>
+            <rect x="19.5072%" y="1090" width="9.6917%" height="21" fill="rgb(255,203,203)" fg:x="64473" fg:w="32032"/>
+            <text x="19.7572%" y="1103.50">        r..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (32,032 bytes, 9.69%)</title>
+            <rect x="19.5072%" y="1112" width="9.6917%" height="21" fill="rgb(255,203,203)" fg:x="64473" fg:w="32032"/>
+            <text x="19.7572%" y="1125.50">fact.py:9 ..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (31,616 bytes, 9.57%)</title>
+            <rect x="19.6331%" y="1134" width="9.5659%" height="21" fill="rgb(255,203,203)" fg:x="64889" fg:w="31616"/>
+            <text x="19.8831%" y="1147.50">        r..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (31,616 bytes, 9.57%)</title>
+            <rect x="19.6331%" y="1156" width="9.5659%" height="21" fill="rgb(255,203,203)" fg:x="64889" fg:w="31616"/>
+            <text x="19.8831%" y="1169.50">fact.py:9 ..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (31,200 bytes, 9.44%)</title>
+            <rect x="19.7590%" y="1178" width="9.4400%" height="21" fill="rgb(255,203,203)" fg:x="65305" fg:w="31200"/>
+            <text x="20.0090%" y="1191.50">        r..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (31,200 bytes, 9.44%)</title>
+            <rect x="19.7590%" y="1200" width="9.4400%" height="21" fill="rgb(255,203,203)" fg:x="65305" fg:w="31200"/>
+            <text x="20.0090%" y="1213.50">fact.py:9 ..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (30,784 bytes, 9.31%)</title>
+            <rect x="19.8848%" y="1222" width="9.3141%" height="21" fill="rgb(255,204,204)" fg:x="65721" fg:w="30784"/>
+            <text x="20.1348%" y="1235.50">        ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (30,784 bytes, 9.31%)</title>
+            <rect x="19.8848%" y="1244" width="9.3141%" height="21" fill="rgb(255,204,204)" fg:x="65721" fg:w="30784"/>
+            <text x="20.1348%" y="1257.50">fact.py:9..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (30,368 bytes, 9.19%)</title>
+            <rect x="20.0107%" y="1266" width="9.1883%" height="21" fill="rgb(255,204,204)" fg:x="66137" fg:w="30368"/>
+            <text x="20.2607%" y="1279.50">        ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (30,368 bytes, 9.19%)</title>
+            <rect x="20.0107%" y="1288" width="9.1883%" height="21" fill="rgb(255,204,204)" fg:x="66137" fg:w="30368"/>
+            <text x="20.2607%" y="1301.50">fact.py:9..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (29,952 bytes, 9.06%)</title>
+            <rect x="20.1366%" y="1310" width="9.0624%" height="21" fill="rgb(255,204,204)" fg:x="66553" fg:w="29952"/>
+            <text x="20.3866%" y="1323.50">        ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (29,952 bytes, 9.06%)</title>
+            <rect x="20.1366%" y="1332" width="9.0624%" height="21" fill="rgb(255,204,204)" fg:x="66553" fg:w="29952"/>
+            <text x="20.3866%" y="1345.50">fact.py:9..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (29,536 bytes, 8.94%)</title>
+            <rect x="20.2624%" y="1354" width="8.9365%" height="21" fill="rgb(255,205,205)" fg:x="66969" fg:w="29536"/>
+            <text x="20.5124%" y="1367.50">        ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (29,536 bytes, 8.94%)</title>
+            <rect x="20.2624%" y="1376" width="8.9365%" height="21" fill="rgb(255,205,205)" fg:x="66969" fg:w="29536"/>
+            <text x="20.5124%" y="1389.50">fact.py:9..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (29,120 bytes, 8.81%)</title>
+            <rect x="20.3883%" y="1398" width="8.8107%" height="21" fill="rgb(255,205,205)" fg:x="67385" fg:w="29120"/>
+            <text x="20.6383%" y="1411.50">        ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (29,120 bytes, 8.81%)</title>
+            <rect x="20.3883%" y="1420" width="8.8107%" height="21" fill="rgb(255,205,205)" fg:x="67385" fg:w="29120"/>
+            <text x="20.6383%" y="1433.50">fact.py:9..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (28,704 bytes, 8.68%)</title>
+            <rect x="20.5142%" y="1442" width="8.6848%" height="21" fill="rgb(255,205,205)" fg:x="67801" fg:w="28704"/>
+            <text x="20.7642%" y="1455.50">        ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (28,704 bytes, 8.68%)</title>
+            <rect x="20.5142%" y="1464" width="8.6848%" height="21" fill="rgb(255,205,205)" fg:x="67801" fg:w="28704"/>
+            <text x="20.7642%" y="1477.50">fact.py:9..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (28,288 bytes, 8.56%)</title>
+            <rect x="20.6400%" y="1486" width="8.5589%" height="21" fill="rgb(255,206,206)" fg:x="68217" fg:w="28288"/>
+            <text x="20.8900%" y="1499.50">       ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (28,288 bytes, 8.56%)</title>
+            <rect x="20.6400%" y="1508" width="8.5589%" height="21" fill="rgb(255,206,206)" fg:x="68217" fg:w="28288"/>
+            <text x="20.8900%" y="1521.50">fact.py:..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (27,872 bytes, 8.43%)</title>
+            <rect x="20.7659%" y="1530" width="8.4331%" height="21" fill="rgb(255,206,206)" fg:x="68633" fg:w="27872"/>
+            <text x="21.0159%" y="1543.50">       ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (27,872 bytes, 8.43%)</title>
+            <rect x="20.7659%" y="1552" width="8.4331%" height="21" fill="rgb(255,206,206)" fg:x="68633" fg:w="27872"/>
+            <text x="21.0159%" y="1565.50">fact.py:..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (27,456 bytes, 8.31%)</title>
+            <rect x="20.8918%" y="1574" width="8.3072%" height="21" fill="rgb(255,206,206)" fg:x="69049" fg:w="27456"/>
+            <text x="21.1418%" y="1587.50">       ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (27,456 bytes, 8.31%)</title>
+            <rect x="20.8918%" y="1596" width="8.3072%" height="21" fill="rgb(255,206,206)" fg:x="69049" fg:w="27456"/>
+            <text x="21.1418%" y="1609.50">fact.py:..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (27,040 bytes, 8.18%)</title>
+            <rect x="21.0176%" y="1618" width="8.1813%" height="21" fill="rgb(255,207,207)" fg:x="69465" fg:w="27040"/>
+            <text x="21.2676%" y="1631.50">       ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (27,040 bytes, 8.18%)</title>
+            <rect x="21.0176%" y="1640" width="8.1813%" height="21" fill="rgb(255,207,207)" fg:x="69465" fg:w="27040"/>
+            <text x="21.2676%" y="1653.50">fact.py:..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (26,624 bytes, 8.06%)</title>
+            <rect x="21.1435%" y="1662" width="8.0555%" height="21" fill="rgb(255,207,207)" fg:x="69881" fg:w="26624"/>
+            <text x="21.3935%" y="1675.50">       ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (26,624 bytes, 8.06%)</title>
+            <rect x="21.1435%" y="1684" width="8.0555%" height="21" fill="rgb(255,207,207)" fg:x="69881" fg:w="26624"/>
+            <text x="21.3935%" y="1697.50">fact.py:..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (26,208 bytes, 7.93%)</title>
+            <rect x="21.2694%" y="1706" width="7.9296%" height="21" fill="rgb(255,207,207)" fg:x="70297" fg:w="26208"/>
+            <text x="21.5194%" y="1719.50">       ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (26,208 bytes, 7.93%)</title>
+            <rect x="21.2694%" y="1728" width="7.9296%" height="21" fill="rgb(255,207,207)" fg:x="70297" fg:w="26208"/>
+            <text x="21.5194%" y="1741.50">fact.py:..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (25,792 bytes, 7.80%)</title>
+            <rect x="21.3952%" y="1750" width="7.8037%" height="21" fill="rgb(255,208,208)" fg:x="70713" fg:w="25792"/>
+            <text x="21.6452%" y="1763.50">      ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (25,792 bytes, 7.80%)</title>
+            <rect x="21.3952%" y="1772" width="7.8037%" height="21" fill="rgb(255,208,208)" fg:x="70713" fg:w="25792"/>
+            <text x="21.6452%" y="1785.50">fact.py..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (25,376 bytes, 7.68%)</title>
+            <rect x="21.5211%" y="1794" width="7.6779%" height="21" fill="rgb(255,208,208)" fg:x="71129" fg:w="25376"/>
+            <text x="21.7711%" y="1807.50">      ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (25,376 bytes, 7.68%)</title>
+            <rect x="21.5211%" y="1816" width="7.6779%" height="21" fill="rgb(255,208,208)" fg:x="71129" fg:w="25376"/>
+            <text x="21.7711%" y="1829.50">fact.py..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (24,960 bytes, 7.55%)</title>
+            <rect x="21.6470%" y="1838" width="7.5520%" height="21" fill="rgb(255,208,208)" fg:x="71545" fg:w="24960"/>
+            <text x="21.8970%" y="1851.50">      ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (24,960 bytes, 7.55%)</title>
+            <rect x="21.6470%" y="1860" width="7.5520%" height="21" fill="rgb(255,208,208)" fg:x="71545" fg:w="24960"/>
+            <text x="21.8970%" y="1873.50">fact.py..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (24,544 bytes, 7.43%)</title>
+            <rect x="21.7728%" y="1882" width="7.4261%" height="21" fill="rgb(255,209,209)" fg:x="71961" fg:w="24544"/>
+            <text x="22.0228%" y="1895.50">      ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (24,544 bytes, 7.43%)</title>
+            <rect x="21.7728%" y="1904" width="7.4261%" height="21" fill="rgb(255,209,209)" fg:x="71961" fg:w="24544"/>
+            <text x="22.0228%" y="1917.50">fact.py..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (24,128 bytes, 7.30%)</title>
+            <rect x="21.8987%" y="1926" width="7.3003%" height="21" fill="rgb(255,209,209)" fg:x="72377" fg:w="24128"/>
+            <text x="22.1487%" y="1939.50">      ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (24,128 bytes, 7.30%)</title>
+            <rect x="21.8987%" y="1948" width="7.3003%" height="21" fill="rgb(255,209,209)" fg:x="72377" fg:w="24128"/>
+            <text x="22.1487%" y="1961.50">fact.py..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (23,712 bytes, 7.17%)</title>
+            <rect x="22.0246%" y="1970" width="7.1744%" height="21" fill="rgb(255,209,209)" fg:x="72793" fg:w="23712"/>
+            <text x="22.2746%" y="1983.50">      ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (23,712 bytes, 7.17%)</title>
+            <rect x="22.0246%" y="1992" width="7.1744%" height="21" fill="rgb(255,209,209)" fg:x="72793" fg:w="23712"/>
+            <text x="22.2746%" y="2005.50">fact.py..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (23,296 bytes, 7.05%)</title>
+            <rect x="22.1504%" y="2014" width="7.0485%" height="21" fill="rgb(255,210,210)" fg:x="73209" fg:w="23296"/>
+            <text x="22.4004%" y="2027.50">     ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (23,296 bytes, 7.05%)</title>
+            <rect x="22.1504%" y="2036" width="7.0485%" height="21" fill="rgb(255,210,210)" fg:x="73209" fg:w="23296"/>
+            <text x="22.4004%" y="2049.50">fact.p..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (22,880 bytes, 6.92%)</title>
+            <rect x="22.2763%" y="2058" width="6.9227%" height="21" fill="rgb(255,210,210)" fg:x="73625" fg:w="22880"/>
+            <text x="22.5263%" y="2071.50">     ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (22,880 bytes, 6.92%)</title>
+            <rect x="22.2763%" y="2080" width="6.9227%" height="21" fill="rgb(255,210,210)" fg:x="73625" fg:w="22880"/>
+            <text x="22.5263%" y="2093.50">fact.p..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (22,464 bytes, 6.80%)</title>
+            <rect x="22.4022%" y="2102" width="6.7968%" height="21" fill="rgb(255,210,210)" fg:x="74041" fg:w="22464"/>
+            <text x="22.6522%" y="2115.50">     ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (22,464 bytes, 6.80%)</title>
+            <rect x="22.4022%" y="2124" width="6.7968%" height="21" fill="rgb(255,210,210)" fg:x="74041" fg:w="22464"/>
+            <text x="22.6522%" y="2137.50">fact.p..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (22,048 bytes, 6.67%)</title>
+            <rect x="22.5280%" y="2146" width="6.6709%" height="21" fill="rgb(255,211,211)" fg:x="74457" fg:w="22048"/>
+            <text x="22.7780%" y="2159.50">     ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (22,048 bytes, 6.67%)</title>
+            <rect x="22.5280%" y="2168" width="6.6709%" height="21" fill="rgb(255,211,211)" fg:x="74457" fg:w="22048"/>
+            <text x="22.7780%" y="2181.50">fact.p..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (21,632 bytes, 6.55%)</title>
+            <rect x="22.6539%" y="2190" width="6.5451%" height="21" fill="rgb(255,211,211)" fg:x="74873" fg:w="21632"/>
+            <text x="22.9039%" y="2203.50">     ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (21,632 bytes, 6.55%)</title>
+            <rect x="22.6539%" y="2212" width="6.5451%" height="21" fill="rgb(255,211,211)" fg:x="74873" fg:w="21632"/>
+            <text x="22.9039%" y="2225.50">fact.p..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (21,216 bytes, 6.42%)</title>
+            <rect x="22.7798%" y="2234" width="6.4192%" height="21" fill="rgb(255,212,212)" fg:x="75289" fg:w="21216"/>
+            <text x="23.0298%" y="2247.50">     ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (21,216 bytes, 6.42%)</title>
+            <rect x="22.7798%" y="2256" width="6.4192%" height="21" fill="rgb(255,212,212)" fg:x="75289" fg:w="21216"/>
+            <text x="23.0298%" y="2269.50">fact.p..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (20,800 bytes, 6.29%)</title>
+            <rect x="22.9056%" y="2278" width="6.2933%" height="21" fill="rgb(255,212,212)" fg:x="75705" fg:w="20800"/>
+            <text x="23.1556%" y="2291.50">     ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (20,800 bytes, 6.29%)</title>
+            <rect x="22.9056%" y="2300" width="6.2933%" height="21" fill="rgb(255,212,212)" fg:x="75705" fg:w="20800"/>
+            <text x="23.1556%" y="2313.50">fact.p..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (20,384 bytes, 6.17%)</title>
+            <rect x="23.0315%" y="2322" width="6.1675%" height="21" fill="rgb(255,212,212)" fg:x="76121" fg:w="20384"/>
+            <text x="23.2815%" y="2335.50">    ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (20,384 bytes, 6.17%)</title>
+            <rect x="23.0315%" y="2344" width="6.1675%" height="21" fill="rgb(255,212,212)" fg:x="76121" fg:w="20384"/>
+            <text x="23.2815%" y="2357.50">fact...</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (19,968 bytes, 6.04%)</title>
+            <rect x="23.1574%" y="2366" width="6.0416%" height="21" fill="rgb(255,213,213)" fg:x="76537" fg:w="19968"/>
+            <text x="23.4074%" y="2379.50">    ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (19,968 bytes, 6.04%)</title>
+            <rect x="23.1574%" y="2388" width="6.0416%" height="21" fill="rgb(255,213,213)" fg:x="76537" fg:w="19968"/>
+            <text x="23.4074%" y="2401.50">fact...</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (19,552 bytes, 5.92%)</title>
+            <rect x="23.2832%" y="2410" width="5.9157%" height="21" fill="rgb(255,213,213)" fg:x="76953" fg:w="19552"/>
+            <text x="23.5332%" y="2423.50">    ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (19,552 bytes, 5.92%)</title>
+            <rect x="23.2832%" y="2432" width="5.9157%" height="21" fill="rgb(255,213,213)" fg:x="76953" fg:w="19552"/>
+            <text x="23.5332%" y="2445.50">fact...</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (19,136 bytes, 5.79%)</title>
+            <rect x="23.4091%" y="2454" width="5.7899%" height="21" fill="rgb(255,213,213)" fg:x="77369" fg:w="19136"/>
+            <text x="23.6591%" y="2467.50">    ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (19,136 bytes, 5.79%)</title>
+            <rect x="23.4091%" y="2476" width="5.7899%" height="21" fill="rgb(255,213,213)" fg:x="77369" fg:w="19136"/>
+            <text x="23.6591%" y="2489.50">fact...</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (18,720 bytes, 5.66%)</title>
+            <rect x="23.5350%" y="2498" width="5.6640%" height="21" fill="rgb(255,214,214)" fg:x="77785" fg:w="18720"/>
+            <text x="23.7850%" y="2511.50">    ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (18,720 bytes, 5.66%)</title>
+            <rect x="23.5350%" y="2520" width="5.6640%" height="21" fill="rgb(255,214,214)" fg:x="77785" fg:w="18720"/>
+            <text x="23.7850%" y="2533.50">fact...</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (18,304 bytes, 5.54%)</title>
+            <rect x="23.6608%" y="2542" width="5.5381%" height="21" fill="rgb(255,214,214)" fg:x="78201" fg:w="18304"/>
+            <text x="23.9108%" y="2555.50">    ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (18,304 bytes, 5.54%)</title>
+            <rect x="23.6608%" y="2564" width="5.5381%" height="21" fill="rgb(255,214,214)" fg:x="78201" fg:w="18304"/>
+            <text x="23.9108%" y="2577.50">fact...</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (17,888 bytes, 5.41%)</title>
+            <rect x="23.7867%" y="2586" width="5.4123%" height="21" fill="rgb(255,215,215)" fg:x="78617" fg:w="17888"/>
+            <text x="24.0367%" y="2599.50">   ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (17,888 bytes, 5.41%)</title>
+            <rect x="23.7867%" y="2608" width="5.4123%" height="21" fill="rgb(255,215,215)" fg:x="78617" fg:w="17888"/>
+            <text x="24.0367%" y="2621.50">fact..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (17,472 bytes, 5.29%)</title>
+            <rect x="23.9126%" y="2630" width="5.2864%" height="21" fill="rgb(255,215,215)" fg:x="79033" fg:w="17472"/>
+            <text x="24.1626%" y="2643.50">   ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (17,472 bytes, 5.29%)</title>
+            <rect x="23.9126%" y="2652" width="5.2864%" height="21" fill="rgb(255,215,215)" fg:x="79033" fg:w="17472"/>
+            <text x="24.1626%" y="2665.50">fact..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (17,056 bytes, 5.16%)</title>
+            <rect x="24.0384%" y="2674" width="5.1605%" height="21" fill="rgb(255,215,215)" fg:x="79449" fg:w="17056"/>
+            <text x="24.2884%" y="2687.50">   ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (17,056 bytes, 5.16%)</title>
+            <rect x="24.0384%" y="2696" width="5.1605%" height="21" fill="rgb(255,215,215)" fg:x="79449" fg:w="17056"/>
+            <text x="24.2884%" y="2709.50">fact..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (16,640 bytes, 5.03%)</title>
+            <rect x="24.1643%" y="2718" width="5.0347%" height="21" fill="rgb(255,216,216)" fg:x="79865" fg:w="16640"/>
+            <text x="24.4143%" y="2731.50">   ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (16,640 bytes, 5.03%)</title>
+            <rect x="24.1643%" y="2740" width="5.0347%" height="21" fill="rgb(255,216,216)" fg:x="79865" fg:w="16640"/>
+            <text x="24.4143%" y="2753.50">fact..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (16,224 bytes, 4.91%)</title>
+            <rect x="24.2902%" y="2762" width="4.9088%" height="21" fill="rgb(255,216,216)" fg:x="80281" fg:w="16224"/>
+            <text x="24.5402%" y="2775.50">   ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (16,224 bytes, 4.91%)</title>
+            <rect x="24.2902%" y="2784" width="4.9088%" height="21" fill="rgb(255,216,216)" fg:x="80281" fg:w="16224"/>
+            <text x="24.5402%" y="2797.50">fact..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (15,808 bytes, 4.78%)</title>
+            <rect x="24.4161%" y="2806" width="4.7829%" height="21" fill="rgb(255,217,217)" fg:x="80697" fg:w="15808"/>
+            <text x="24.6661%" y="2819.50">   ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (15,808 bytes, 4.78%)</title>
+            <rect x="24.4161%" y="2828" width="4.7829%" height="21" fill="rgb(255,217,217)" fg:x="80697" fg:w="15808"/>
+            <text x="24.6661%" y="2841.50">fact..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (15,392 bytes, 4.66%)</title>
+            <rect x="24.5419%" y="2850" width="4.6571%" height="21" fill="rgb(255,217,217)" fg:x="81113" fg:w="15392"/>
+            <text x="24.7919%" y="2863.50">  ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (15,392 bytes, 4.66%)</title>
+            <rect x="24.5419%" y="2872" width="4.6571%" height="21" fill="rgb(255,217,217)" fg:x="81113" fg:w="15392"/>
+            <text x="24.7919%" y="2885.50">fac..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (14,976 bytes, 4.53%)</title>
+            <rect x="24.6678%" y="2894" width="4.5312%" height="21" fill="rgb(255,218,218)" fg:x="81529" fg:w="14976"/>
+            <text x="24.9178%" y="2907.50">  ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (14,976 bytes, 4.53%)</title>
+            <rect x="24.6678%" y="2916" width="4.5312%" height="21" fill="rgb(255,218,218)" fg:x="81529" fg:w="14976"/>
+            <text x="24.9178%" y="2929.50">fac..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (14,560 bytes, 4.41%)</title>
+            <rect x="24.7937%" y="2938" width="4.4053%" height="21" fill="rgb(255,218,218)" fg:x="81945" fg:w="14560"/>
+            <text x="25.0437%" y="2951.50">  ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (14,560 bytes, 4.41%)</title>
+            <rect x="24.7937%" y="2960" width="4.4053%" height="21" fill="rgb(255,218,218)" fg:x="81945" fg:w="14560"/>
+            <text x="25.0437%" y="2973.50">fac..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (14,144 bytes, 4.28%)</title>
+            <rect x="24.9195%" y="2982" width="4.2795%" height="21" fill="rgb(255,219,219)" fg:x="82361" fg:w="14144"/>
+            <text x="25.1695%" y="2995.50">  ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (14,144 bytes, 4.28%)</title>
+            <rect x="24.9195%" y="3004" width="4.2795%" height="21" fill="rgb(255,219,219)" fg:x="82361" fg:w="14144"/>
+            <text x="25.1695%" y="3017.50">fac..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (13,728 bytes, 4.15%)</title>
+            <rect x="25.0454%" y="3026" width="4.1536%" height="21" fill="rgb(255,219,219)" fg:x="82777" fg:w="13728"/>
+            <text x="25.2954%" y="3039.50">  ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (13,728 bytes, 4.15%)</title>
+            <rect x="25.0454%" y="3048" width="4.1536%" height="21" fill="rgb(255,219,219)" fg:x="82777" fg:w="13728"/>
+            <text x="25.2954%" y="3061.50">fac..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (13,312 bytes, 4.03%)</title>
+            <rect x="25.1713%" y="3070" width="4.0277%" height="21" fill="rgb(255,219,219)" fg:x="83193" fg:w="13312"/>
+            <text x="25.4213%" y="3083.50">  ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (13,312 bytes, 4.03%)</title>
+            <rect x="25.1713%" y="3092" width="4.0277%" height="21" fill="rgb(255,219,219)" fg:x="83193" fg:w="13312"/>
+            <text x="25.4213%" y="3105.50">fac..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (12,896 bytes, 3.90%)</title>
+            <rect x="25.2971%" y="3114" width="3.9019%" height="21" fill="rgb(255,220,220)" fg:x="83609" fg:w="12896"/>
+            <text x="25.5471%" y="3127.50"> ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (12,896 bytes, 3.90%)</title>
+            <rect x="25.2971%" y="3136" width="3.9019%" height="21" fill="rgb(255,220,220)" fg:x="83609" fg:w="12896"/>
+            <text x="25.5471%" y="3149.50">fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (12,480 bytes, 3.78%)</title>
+            <rect x="25.4230%" y="3158" width="3.7760%" height="21" fill="rgb(255,220,220)" fg:x="84025" fg:w="12480"/>
+            <text x="25.6730%" y="3171.50"> ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (12,480 bytes, 3.78%)</title>
+            <rect x="25.4230%" y="3180" width="3.7760%" height="21" fill="rgb(255,220,220)" fg:x="84025" fg:w="12480"/>
+            <text x="25.6730%" y="3193.50">fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (12,064 bytes, 3.65%)</title>
+            <rect x="25.5489%" y="3202" width="3.6501%" height="21" fill="rgb(255,221,221)" fg:x="84441" fg:w="12064"/>
+            <text x="25.7989%" y="3215.50"> ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (12,064 bytes, 3.65%)</title>
+            <rect x="25.5489%" y="3224" width="3.6501%" height="21" fill="rgb(255,221,221)" fg:x="84441" fg:w="12064"/>
+            <text x="25.7989%" y="3237.50">fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (11,648 bytes, 3.52%)</title>
+            <rect x="25.6747%" y="3246" width="3.5243%" height="21" fill="rgb(255,221,221)" fg:x="84857" fg:w="11648"/>
+            <text x="25.9247%" y="3259.50"> ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (11,648 bytes, 3.52%)</title>
+            <rect x="25.6747%" y="3268" width="3.5243%" height="21" fill="rgb(255,221,221)" fg:x="84857" fg:w="11648"/>
+            <text x="25.9247%" y="3281.50">fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (11,232 bytes, 3.40%)</title>
+            <rect x="25.8006%" y="3290" width="3.3984%" height="21" fill="rgb(255,222,222)" fg:x="85273" fg:w="11232"/>
+            <text x="26.0506%" y="3303.50"> ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (11,232 bytes, 3.40%)</title>
+            <rect x="25.8006%" y="3312" width="3.3984%" height="21" fill="rgb(255,222,222)" fg:x="85273" fg:w="11232"/>
+            <text x="26.0506%" y="3325.50">fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (10,816 bytes, 3.27%)</title>
+            <rect x="25.9265%" y="3334" width="3.2725%" height="21" fill="rgb(255,222,222)" fg:x="85689" fg:w="10816"/>
+            <text x="26.1765%" y="3347.50"> ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (10,816 bytes, 3.27%)</title>
+            <rect x="25.9265%" y="3356" width="3.2725%" height="21" fill="rgb(255,222,222)" fg:x="85689" fg:w="10816"/>
+            <text x="26.1765%" y="3369.50">fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (10,400 bytes, 3.15%)</title>
+            <rect x="26.0523%" y="3378" width="3.1467%" height="21" fill="rgb(255,223,223)" fg:x="86105" fg:w="10400"/>
+            <text x="26.3023%" y="3391.50"> ..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (10,400 bytes, 3.15%)</title>
+            <rect x="26.0523%" y="3400" width="3.1467%" height="21" fill="rgb(255,223,223)" fg:x="86105" fg:w="10400"/>
+            <text x="26.3023%" y="3413.50">fa..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (9,984 bytes, 3.02%)</title>
+            <rect x="26.1782%" y="3422" width="3.0208%" height="21" fill="rgb(255,223,223)" fg:x="86521" fg:w="9984"/>
+            <text x="26.4282%" y="3435.50">..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (9,984 bytes, 3.02%)</title>
+            <rect x="26.1782%" y="3444" width="3.0208%" height="21" fill="rgb(255,223,223)" fg:x="86521" fg:w="9984"/>
+            <text x="26.4282%" y="3457.50">f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (9,568 bytes, 2.89%)</title>
+            <rect x="26.3041%" y="3466" width="2.8949%" height="21" fill="rgb(255,224,224)" fg:x="86937" fg:w="9568"/>
+            <text x="26.5541%" y="3479.50">..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (9,568 bytes, 2.89%)</title>
+            <rect x="26.3041%" y="3488" width="2.8949%" height="21" fill="rgb(255,224,224)" fg:x="86937" fg:w="9568"/>
+            <text x="26.5541%" y="3501.50">f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (9,152 bytes, 2.77%)</title>
+            <rect x="26.4299%" y="3510" width="2.7691%" height="21" fill="rgb(255,225,225)" fg:x="87353" fg:w="9152"/>
+            <text x="26.6799%" y="3523.50">..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (9,152 bytes, 2.77%)</title>
+            <rect x="26.4299%" y="3532" width="2.7691%" height="21" fill="rgb(255,225,225)" fg:x="87353" fg:w="9152"/>
+            <text x="26.6799%" y="3545.50">f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (8,736 bytes, 2.64%)</title>
+            <rect x="26.5558%" y="3554" width="2.6432%" height="21" fill="rgb(255,225,225)" fg:x="87769" fg:w="8736"/>
+            <text x="26.8058%" y="3567.50">..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (8,736 bytes, 2.64%)</title>
+            <rect x="26.5558%" y="3576" width="2.6432%" height="21" fill="rgb(255,225,225)" fg:x="87769" fg:w="8736"/>
+            <text x="26.8058%" y="3589.50">f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (8,320 bytes, 2.52%)</title>
+            <rect x="26.6817%" y="3598" width="2.5173%" height="21" fill="rgb(255,226,226)" fg:x="88185" fg:w="8320"/>
+            <text x="26.9317%" y="3611.50">..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (8,320 bytes, 2.52%)</title>
+            <rect x="26.6817%" y="3620" width="2.5173%" height="21" fill="rgb(255,226,226)" fg:x="88185" fg:w="8320"/>
+            <text x="26.9317%" y="3633.50">f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (7,904 bytes, 2.39%)</title>
+            <rect x="26.8075%" y="3642" width="2.3915%" height="21" fill="rgb(255,226,226)" fg:x="88601" fg:w="7904"/>
+            <text x="27.0575%" y="3655.50">..</text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (7,904 bytes, 2.39%)</title>
+            <rect x="26.8075%" y="3664" width="2.3915%" height="21" fill="rgb(255,226,226)" fg:x="88601" fg:w="7904"/>
+            <text x="27.0575%" y="3677.50">f..</text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (7,488 bytes, 2.27%)</title>
+            <rect x="26.9334%" y="3686" width="2.2656%" height="21" fill="rgb(255,227,227)" fg:x="89017" fg:w="7488"/>
+            <text x="27.1834%" y="3699.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (7,488 bytes, 2.27%)</title>
+            <rect x="26.9334%" y="3708" width="2.2656%" height="21" fill="rgb(255,227,227)" fg:x="89017" fg:w="7488"/>
+            <text x="27.1834%" y="3721.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (7,072 bytes, 2.14%)</title>
+            <rect x="27.0593%" y="3730" width="2.1397%" height="21" fill="rgb(255,228,228)" fg:x="89433" fg:w="7072"/>
+            <text x="27.3093%" y="3743.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (7,072 bytes, 2.14%)</title>
+            <rect x="27.0593%" y="3752" width="2.1397%" height="21" fill="rgb(255,228,228)" fg:x="89433" fg:w="7072"/>
+            <text x="27.3093%" y="3765.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (6,656 bytes, 2.01%)</title>
+            <rect x="27.1851%" y="3774" width="2.0139%" height="21" fill="rgb(255,228,228)" fg:x="89849" fg:w="6656"/>
+            <text x="27.4351%" y="3787.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (6,656 bytes, 2.01%)</title>
+            <rect x="27.1851%" y="3796" width="2.0139%" height="21" fill="rgb(255,228,228)" fg:x="89849" fg:w="6656"/>
+            <text x="27.4351%" y="3809.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (6,240 bytes, 1.89%)</title>
+            <rect x="27.3110%" y="3818" width="1.8880%" height="21" fill="rgb(255,229,229)" fg:x="90265" fg:w="6240"/>
+            <text x="27.5610%" y="3831.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (6,240 bytes, 1.89%)</title>
+            <rect x="27.3110%" y="3840" width="1.8880%" height="21" fill="rgb(255,229,229)" fg:x="90265" fg:w="6240"/>
+            <text x="27.5610%" y="3853.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (5,824 bytes, 1.76%)</title>
+            <rect x="27.4369%" y="3862" width="1.7621%" height="21" fill="rgb(255,230,230)" fg:x="90681" fg:w="5824"/>
+            <text x="27.6869%" y="3875.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (5,824 bytes, 1.76%)</title>
+            <rect x="27.4369%" y="3884" width="1.7621%" height="21" fill="rgb(255,230,230)" fg:x="90681" fg:w="5824"/>
+            <text x="27.6869%" y="3897.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (5,408 bytes, 1.64%)</title>
+            <rect x="27.5627%" y="3906" width="1.6363%" height="21" fill="rgb(255,230,230)" fg:x="91097" fg:w="5408"/>
+            <text x="27.8127%" y="3919.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (5,408 bytes, 1.64%)</title>
+            <rect x="27.5627%" y="3928" width="1.6363%" height="21" fill="rgb(255,230,230)" fg:x="91097" fg:w="5408"/>
+            <text x="27.8127%" y="3941.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (4,992 bytes, 1.51%)</title>
+            <rect x="27.6886%" y="3950" width="1.5104%" height="21" fill="rgb(255,231,231)" fg:x="91513" fg:w="4992"/>
+            <text x="27.9386%" y="3963.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (4,992 bytes, 1.51%)</title>
+            <rect x="27.6886%" y="3972" width="1.5104%" height="21" fill="rgb(255,231,231)" fg:x="91513" fg:w="4992"/>
+            <text x="27.9386%" y="3985.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (4,576 bytes, 1.38%)</title>
+            <rect x="27.8145%" y="3994" width="1.3845%" height="21" fill="rgb(255,232,232)" fg:x="91929" fg:w="4576"/>
+            <text x="28.0645%" y="4007.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (4,576 bytes, 1.38%)</title>
+            <rect x="27.8145%" y="4016" width="1.3845%" height="21" fill="rgb(255,232,232)" fg:x="91929" fg:w="4576"/>
+            <text x="28.0645%" y="4029.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (4,160 bytes, 1.26%)</title>
+            <rect x="27.9403%" y="4038" width="1.2587%" height="21" fill="rgb(255,233,233)" fg:x="92345" fg:w="4160"/>
+            <text x="28.1903%" y="4051.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (4,160 bytes, 1.26%)</title>
+            <rect x="27.9403%" y="4060" width="1.2587%" height="21" fill="rgb(255,233,233)" fg:x="92345" fg:w="4160"/>
+            <text x="28.1903%" y="4073.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (3,744 bytes, 1.13%)</title>
+            <rect x="28.0662%" y="4082" width="1.1328%" height="21" fill="rgb(255,234,234)" fg:x="92761" fg:w="3744"/>
+            <text x="28.3162%" y="4095.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (3,744 bytes, 1.13%)</title>
+            <rect x="28.0662%" y="4104" width="1.1328%" height="21" fill="rgb(255,234,234)" fg:x="92761" fg:w="3744"/>
+            <text x="28.3162%" y="4117.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (3,328 bytes, 1.01%)</title>
+            <rect x="28.1921%" y="4126" width="1.0069%" height="21" fill="rgb(255,235,235)" fg:x="93177" fg:w="3328"/>
+            <text x="28.4421%" y="4139.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (3,328 bytes, 1.01%)</title>
+            <rect x="28.1921%" y="4148" width="1.0069%" height="21" fill="rgb(255,235,235)" fg:x="93177" fg:w="3328"/>
+            <text x="28.4421%" y="4161.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (2,912 bytes, 0.88%)</title>
+            <rect x="28.3179%" y="4170" width="0.8811%" height="21" fill="rgb(255,235,235)" fg:x="93593" fg:w="2912"/>
+            <text x="28.5679%" y="4183.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (2,912 bytes, 0.88%)</title>
+            <rect x="28.3179%" y="4192" width="0.8811%" height="21" fill="rgb(255,235,235)" fg:x="93593" fg:w="2912"/>
+            <text x="28.5679%" y="4205.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (2,496 bytes, 0.76%)</title>
+            <rect x="28.4438%" y="4214" width="0.7552%" height="21" fill="rgb(255,237,237)" fg:x="94009" fg:w="2496"/>
+            <text x="28.6938%" y="4227.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (2,496 bytes, 0.76%)</title>
+            <rect x="28.4438%" y="4236" width="0.7552%" height="21" fill="rgb(255,237,237)" fg:x="94009" fg:w="2496"/>
+            <text x="28.6938%" y="4249.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (2,080 bytes, 0.63%)</title>
+            <rect x="28.5697%" y="4258" width="0.6293%" height="21" fill="rgb(255,238,238)" fg:x="94425" fg:w="2080"/>
+            <text x="28.8197%" y="4271.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (2,080 bytes, 0.63%)</title>
+            <rect x="28.5697%" y="4280" width="0.6293%" height="21" fill="rgb(255,238,238)" fg:x="94425" fg:w="2080"/>
+            <text x="28.8197%" y="4293.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (1,664 bytes, 0.50%)</title>
+            <rect x="28.6955%" y="4302" width="0.5035%" height="21" fill="rgb(255,239,239)" fg:x="94841" fg:w="1664"/>
+            <text x="28.9455%" y="4315.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (1,664 bytes, 0.50%)</title>
+            <rect x="28.6955%" y="4324" width="0.5035%" height="21" fill="rgb(255,239,239)" fg:x="94841" fg:w="1664"/>
+            <text x="28.9455%" y="4337.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (1,248 bytes, 0.38%)</title>
+            <rect x="28.8214%" y="4346" width="0.3776%" height="21" fill="rgb(255,240,240)" fg:x="95257" fg:w="1248"/>
+            <text x="29.0714%" y="4359.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (1,248 bytes, 0.38%)</title>
+            <rect x="28.8214%" y="4368" width="0.3776%" height="21" fill="rgb(255,240,240)" fg:x="95257" fg:w="1248"/>
+            <text x="29.0714%" y="4381.50"></text>
+        </g>
+        <g>
+            <title>        return n * fact(n - 1) (832 bytes, 0.25%)</title>
+            <rect x="28.9473%" y="4390" width="0.2517%" height="21" fill="rgb(255,242,242)" fg:x="95673" fg:w="832"/>
+            <text x="29.1973%" y="4403.50"></text>
+        </g>
+        <g>
+            <title>fact.py:9 (fact) (832 bytes, 0.25%)</title>
+            <rect x="28.9473%" y="4412" width="0.2517%" height="21" fill="rgb(255,242,242)" fg:x="95673" fg:w="832"/>
+            <text x="29.1973%" y="4425.50"></text>
+        </g>
+        <g>
+            <title>            code = compile(f.read(), fname, &apos;exec&apos;) (233,363 bytes, 70.61%)</title>
+            <rect x="29.2643%" y="122" width="70.6074%" height="21" fill="rgb(255,124,124)" fg:x="96721" fg:w="233363"/>
+            <text x="29.5143%" y="135.50">            code = compile(f.read(), fname, &apos;exec&apos;)</text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/runpy.py:257 (_get_code_from_file) (233,363 bytes, 70.61%)</title>
+            <rect x="29.2643%" y="144" width="70.6074%" height="21" fill="rgb(255,124,124)" fg:x="96721" fg:w="233363"/>
+            <text x="29.5143%" y="157.50">/usr/lib/python3.10/runpy.py:257 (_get_code_from_file)</text>
+        </g>
+        <g>
+            <title>        code, fname = _get_code_from_file(run_name, path_name) (233,363 bytes, 70.61%)</title>
+            <rect x="29.2643%" y="166" width="70.6074%" height="21" fill="rgb(255,124,124)" fg:x="96721" fg:w="233363"/>
+            <text x="29.5143%" y="179.50">        code, fname = _get_code_from_file(run_name, path_name)..</text>
+        </g>
+        <g>
+            <title>/usr/lib/python3.10/runpy.py:288 (run_path) (233,363 bytes, 70.61%)</title>
+            <rect x="29.2643%" y="188" width="70.6074%" height="21" fill="rgb(255,124,124)" fg:x="96721" fg:w="233363"/>
+            <text x="29.5143%" y="201.50">/usr/lib/python3.10/runpy.py:288 (run_path)</text>
+        </g>
+        <g>
+            <title>all (330,508 bytes, 100%)</title>
+            <rect x="0.0000%" y="100" width="100.0000%" height="21" fill="rgb(255,100,100)" fg:x="0" fg:w="330508"/>
+            <text x="0.2500%" y="113.50"></text>
+        </g>
+    </svg>
+</svg>
