@@ -8,8 +8,8 @@ process = psutil.Process(os.getpid())
 #         return var
 #     return factorial.tail_call(n-1, var=var*n)
 
-# factorial(1000)
-
+# val = factorial(1000)
+# print(val)
 
 def factorial(n, var=1):
     if n == 0:
@@ -18,4 +18,4 @@ def factorial(n, var=1):
 
 factorial(1000)
 
-print(process.memory_info().rss)  # in bytes 
+# print(process.memory_info().rss)  # in bytes 

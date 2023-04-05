@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="210mm"
+   height="297mm"
+   viewBox="0 0 210 297"
+   version="1.1"
+   id="svg5"
+   inkscape:version="1.1.2 (0a00cf5339, 2022-02-04)"
+   sodipodi:docname="linkedlist and dynamic array.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview7"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:document-units="mm"
+     showgrid="false"
+     inkscape:zoom="0.67024358"
+     inkscape:cx="12.681957"
+     inkscape:cy="300.63697"
+     inkscape:window-width="1292"
+     inkscape:window-height="704"
+     inkscape:window-x="74"
+     inkscape:window-y="27"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs2" />
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <g
+       id="g63"
+       transform="matrix(0.26458333,0,0,0.26458333,25.423973,77.747213)">
+      <path
+         d="M 26,4 H 6 A 2,2 0 0 0 4,6 v 20 a 2,2 0 0 0 2,2 h 20 a 2,2 0 0 0 2,-2 V 6 A 2,2 0 0 0 26,4 Z M 6,26 V 6 h 20 v 20 z"
+         id="path51" />
+      <path
+         d="M 0,0 H 32 V 32 H 0 Z"
+         fill="none"
+         id="path53" />
+    </g>
+    <g
+       id="g63-3"
+       transform="matrix(0.26458333,0,0,0.26458333,31.244807,77.747213)">
+      <path
+         d="M 26,4 H 6 A 2,2 0 0 0 4,6 v 20 a 2,2 0 0 0 2,2 h 20 a 2,2 0 0 0 2,-2 V 6 A 2,2 0 0 0 26,4 Z M 6,26 V 6 h 20 v 20 z"
+         id="path51-6" />
+      <path
+         d="M 0,0 H 32 V 32 H 0 Z"
+         fill="none"
+         id="path53-7" />
+    </g>
+    <g
+       id="g63-60"
+       transform="matrix(0.26458333,0,0,0.26458333,44.494145,77.83544)">
+      <path
+         d="M 26,4 H 6 A 2,2 0 0 0 4,6 v 20 a 2,2 0 0 0 2,2 h 20 a 2,2 0 0 0 2,-2 V 6 A 2,2 0 0 0 26,4 Z M 6,26 V 6 h 20 v 20 z"
+         id="path51-62" />
+      <path
+         d="M 0,0 H 32 V 32 H 0 Z"
+         fill="none"
+         id="path53-6" />
+    </g>
+    <g
+       id="g63-3-18"
+       transform="matrix(0.26458333,0,0,0.26458333,50.314979,77.83544)">
+      <path
+         d="M 26,4 H 6 A 2,2 0 0 0 4,6 v 20 a 2,2 0 0 0 2,2 h 20 a 2,2 0 0 0 2,-2 V 6 A 2,2 0 0 0 26,4 Z M 6,26 V 6 h 20 v 20 z"
+         id="path51-6-7" />
+      <path
+         d="M 0,0 H 32 V 32 H 0 Z"
+         fill="none"
+         id="path53-7-9" />
+    </g>
+    <g
+       id="g63-3-5"
+       transform="matrix(0.26458333,0,0,0.26458333,39.489066,21.565167)">
+      <path
+         d="M 26,4 H 6 A 2,2 0 0 0 4,6 v 20 a 2,2 0 0 0 2,2 h 20 a 2,2 0 0 0 2,-2 V 6 A 2,2 0 0 0 26,4 Z M 6,26 V 6 h 20 v 20 z"
+         id="path51-6-3" />
+      <path
+         d="M 0,0 H 32 V 32 H 0 Z"
+         fill="none"
+         id="path53-7-5" />
+    </g>
+    <g
+       id="g63-6"
+       transform="matrix(0.26458333,0,0,0.26458333,47.955732,21.565167)">
+      <path
+         d="M 26,4 H 6 A 2,2 0 0 0 4,6 v 20 a 2,2 0 0 0 2,2 h 20 a 2,2 0 0 0 2,-2 V 6 A 2,2 0 0 0 26,4 Z M 6,26 V 6 h 20 v 20 z"
+         id="path51-2" />
+      <path
+         d="M 0,0 H 32 V 32 H 0 Z"
+         fill="none"
+         id="path53-9" />
+    </g>
+    <g
+       id="g63-3-1"
+       transform="matrix(0.26458333,0,0,0.26458333,56.422399,21.565167)">
+      <path
+         d="M 26,4 H 6 A 2,2 0 0 0 4,6 v 20 a 2,2 0 0 0 2,2 h 20 a 2,2 0 0 0 2,-2 V 6 A 2,2 0 0 0 26,4 Z M 6,26 V 6 h 20 v 20 z"
+         id="path51-6-2" />
+      <path
+         d="M 0,0 H 32 V 32 H 0 Z"
+         fill="none"
+         id="path53-7-7" />
+    </g>
+    <g
+       id="g63-3-5-0"
+       transform="matrix(0.26458333,0,0,0.26458333,64.889066,21.565167)">
+      <path
+         d="M 26,4 H 6 A 2,2 0 0 0 4,6 v 20 a 2,2 0 0 0 2,2 h 20 a 2,2 0 0 0 2,-2 V 6 A 2,2 0 0 0 26,4 Z M 6,26 V 6 h 20 v 20 z"
+         id="path51-6-3-9" />
+      <path
+         d="M 0,0 H 32 V 32 H 0 Z"
+         fill="none"
+         id="path53-7-5-3" />
+    </g>
+  </g>
+</svg>
